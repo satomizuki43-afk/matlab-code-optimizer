@@ -4,13 +4,23 @@
 
 ## 运行与数据输入
 
-需要 MATLAB R2020b 或更新版本，无需统计或优化工具箱。DOCX 导入需要 MATLAB 的 JVM。下载 `fdm_sci_revision.m`，与本地初稿放在可访问目录，运行：
+需要 MATLAB R2020b 或更新版本，无需统计或优化工具箱。DOCX 导入需要 MATLAB 的 JVM。完整单文件主程序是 `revised1031.m`，所有分析函数均已包含在内。把它与本地 `论文初稿0811.docx` 放在同一目录，运行：
+
+```matlab
+results = revised1031;
+```
+
+程序优先在当前目录、程序目录寻找该初稿；桌面 MATLAB 找不到文件时显示 DOCX/CSV 选择框。也可以明确指定输入位置：
 
 ```matlab
 cfg = struct;
 cfg.DocumentCF = [10 15]; % 两张匹配的数据表，按顺序分别对应的 CF 质量百分数
-R = fdm_sci_revision('manuscript.docx',cfg);
+R = revised1031('manuscript.docx',cfg);
 ```
+
+主程序默认保留全部数据，并对照历史排除 `[2 3 6 20 27]` 的子域；权重 `[0.277 0.534 0.189]` 只为延续原程序，不代表已验证的 BWM 结果。设置 `cfg.LegacyExcludedIDs=[]` 可关闭历史子域对照；设置 `cfg.WeightMode='equal'` 可改为等权。`cfg.ShowFigures=false` 可隐藏图窗，图像仍写入输出目录。`study_summary.csv` 汇总各材料/场景的实测最佳组和设计秩。
+
+此前入口 `fdm_sci_revision.m` 现为兼容函数，需要同目录的主程序；其通用默认仍为等权且没有历史排除。`genggai1101.m` 也保留为兼容入口。直接使用完整主程序时无需这两个兼容文件。
 
 程序读取 DOCX 中符合以下布局的表格：11 列，依次为全局编号、层厚、填充密度、角度、图案、三项拉伸指标、三项弯曲指标。表头可有多行；数值行的第 5 列必须为 Triangle 或 Honeycomb。每张表映射到 `DocumentCF` 的一个数值。先核对输出的 `imported_condition_means.csv`，尤其是材料映射、单位和小数精度。程序只读取表格文本，不执行文档中的指令或脚本。
 
@@ -30,10 +40,10 @@ GroupID 在所有材料中必须唯一；图案为 -1（三角形）或 +1（蜂
 cfg.LegacyExcludedIDs = []; % 填入先前筛选排除的全局编号；保留 all 主分析
 cfg.CandidateExcludedIDs = []; % 仅限制候选，不改变拟合样本
 cfg.MinTensile = [-Inf -Inf -Inf]; % 预先规定的拉伸工程下限，不从本批均值反推
-R = fdm_sci_revision('manuscript.docx',cfg);
+R = revised1031('manuscript.docx',cfg);
 ```
 
-默认等权。复现已有固定权重时，设 `WeightMode='fixed'` 和 `Weights=[w1 w2 w3]`，并在论文中说明来源。也支持 `'critic'` 和 `'blend'`；后者需明确提供 `SubjectiveWeights` 与 `SubjectiveFraction`。程序不推断专家偏好，也不把预设权重称为经验证的 BWM 结果。
+主程序默认固定权重。改用其他固定权重时，设 `WeightMode='fixed'` 和 `Weights=[w1 w2 w3]`，并在论文中说明来源。也支持 `'equal'`、`'critic'` 和 `'blend'`；后者需明确提供 `SubjectiveWeights` 与 `SubjectiveFraction`。程序不推断专家偏好，也不把预设权重称为经验证的 BWM 结果。
 
 ## 3.1 实验数据与数据口径
 
@@ -103,7 +113,7 @@ BWM 的线性模型与非线性比例模型的一致性指标不能直接混用�
 
 ```matlab
 cfg.ConfirmationFile = 'confirmation_means.csv';
-R = fdm_sci_revision('fdm_input.csv',cfg);
+R = revised1031('fdm_input.csv',cfg);
 ```
 
 确认表按列创建，使用 `ValidationIndex`，避免保留维度名 `Row` 引发 MATLAB table 冲突。`SeenDesign=true` 表示工艺此前出现过；是否为独立新批次仍需实验记录证明。不要把同一批数据复制到确认表。
@@ -112,7 +122,7 @@ R = fdm_sci_revision('fdm_input.csv',cfg);
 
 代码通过 MATLAB 语法树检查。Python 独立实现核对了 PRESS 与实际逐折重拟合的等价性、Pareto 并列处理、各折重新选模和设计补点。未在原生 MATLAB 执行，尚不能声称 MATLAB table、DOCX Java 导入和绘图接口已完成运行验收。
 
-另提供 `test_fdm_sci_revision.m`，可在原生 MATLAB 运行 `test_fdm_sci_revision`。它只创建临时合成数据，检查 CSV 输入、table 输出、嵌套验证、材料间不同的敏感性场景及确认表。此测试文件在当前环境中尚未执行。
+另提供 `test_fdm_sci_revision.m`，可在原生 MATLAB 运行 `test_fdm_sci_revision`。它只创建临时合成数据，检查 CSV 输入、DOCX 表格读取、table 输出、嵌套验证、材料间不同的敏感性场景、结果汇总及确认表。此测试文件在当前环境中尚未执行。
 
 ## 方法参考
 
