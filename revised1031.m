@@ -1,461 +1,616 @@
-%% PA12-CF 两阶段优化：拉伸筛选后的弯曲响应建模与分类图案验证
-% 说明：
-% 1) 所有经核查的实验数据均保留，不自动删除异常点；
-% 2) 图案采用效应编码：-1=三角形，+1=蜂窝；不在两者之间插值；
-% 3) 数据为拉伸筛选后保留的弯曲候选工艺，不将淘汰组视为随机缺失；
-% 4) 限制模型项数和残差自由度，避免超小样本过拟合；
-% 5) 用PRESS选择模型，同时报告固定模型LOO和嵌套LOO；
-% 6) 正值约束只在保留候选工艺上检查，不作为数据修正；
-% 7) 已测试保留组的最终GRG采用实测值，模型GRG仅作辅助；
-% 8) 输出设计矩阵条件数、杠杆值和95%预测区间；
-% 9) 确认试验数据单独输入，不参与模型拟合。
+function results = revised1031(dataFile, cfg)
+% PA12-CF 三点弯曲综合性能分析：完整单文件主程序。
+% 保存为 revised1031.m，MATLAB R2020b+，无需统计或优化工具箱。
+% 把本程序与“论文初稿0811.docx”放在同一目录，运行：
+%   results = revised1031;
+% 也可以明确指定 DOCX/CSV 文件及设置：
+%   cfg = struct('MakeFigures',true,'ShowFigures',true);
+%   results = revised1031('论文初稿0811.docx',cfg);
+%
+% 默认保留全部实验数据；同时对照历史排除 ID 2、3、6、20、27 的子域。
+% 图案：-1=三角形，+1=蜂窝。材料分别建模，图案不连续插值。
+% 默认固定权重 [0.277 0.534 0.189] 仅用于延续原程序，不代表已验证的BWM权重。
+% 设置 cfg.WeightMode='equal' 或 'critic' 可分别比较等权或CRITIC。
+% 积分 sigma(MPa)*d epsilon(无量纲) 的单位是 MJ/m^3。
+% 程序读取已有积分数值，不会自动核实百分应变或改变积分终点。
+% 主分析为实测排序；模型候选始终需要独立确认，不自动删除高影响点。
+% 所有局部函数均包含在本文件，不依赖 fdm_sci_revision.m。
 
-clear; clc; close all;
-
-%% 1. 数据与编码
-% 特征顺序：
-% [1, layer, density, angle, pattern, layer^2, density^2, angle^2,
-%  layer*density, layer*angle, density*angle,
-%  layer*pattern, density*pattern, angle*pattern]
-% buildX在文件末尾定义为局部函数。脚本中不能同时存在同名变量和局部函数，
-% 因此这里不再定义同名匿名函数。
-
-termNames = {'Intercept','Layer','Density','Angle','Pattern', ...
-    'Layer^2','Density^2','Angle^2', ...
-    'Layer*Density','Layer*Angle','Density*Angle', ...
-    'Layer*Pattern','Density*Pattern','Angle*Pattern'};
-
-% 图案编码：-1=三角形，+1=蜂窝
-patternNames = ["Triangle", "Honeycomb"];
-
-% [组号, 层厚, 密度, 角度, 图案, 弯曲强度, 弯曲模量, 弯曲韧性]
-% 下面数据为拉伸筛选后进入弯曲阶段的候选工艺，全部保留。
-Data10 = [
-    1,  .30, 40,  0, -1, 60.9202, 1914.8370, 2.058360;
-    4,  .40, 40,  0,  1, 42.6411, 1287.9225, 1.370590;
-    5,  .40, 40, 45, -1, 35.7520, 1541.3380, 1.061900;
-    7,  .35, 60, 45,  1, 22.6772,  726.3775, 0.688530;
-    8,  .35, 60, 45, -1, 48.6142, 1612.2040, 1.492010;
-    9,  .40, 60, 90, -1, 27.4961,  779.5275, 0.793894;
-    10, .30, 80, 45,  1, 44.8228, 2037.4010, 1.439790;
-    11, .30, 80, 90, -1, 52.6393, 1568.3960, 1.625970;
-    12, .35, 80,  0, -1, 55.7652, 1964.0900, 1.880280;
-    13, .40, 80,  0, -1, 48.2244, 2001.9680, 1.628660;
-    14, .40, 80, 90,  1, 20.8346,  726.3775, 0.721900];
-
-Data15 = [
-    1,  .30, 40,  0, -1, 49.4646, 1789.3695, 1.529460;
-    2,  .30, 40, 90,  1, 25.2638,  903.5430, 0.778292;
-    3,  .35, 40, 90,  1, 27.3543, 1470.4720, 0.854362;
-    4,  .40, 40,  0,  1, 34.1575, 1222.4406, 1.056980;
-    5,  .40, 40, 45, -1, 35.9646, 1045.2755, 1.073990;
-    7,  .35, 60, 45,  1, 39.1181, 1452.7555, 1.240570;
-    8,  .35, 60, 45, -1, 42.8392, 1474.8466, 1.349260;
-    9,  .40, 60, 90, -1, 32.0315,  992.1255, 0.936843;
-    10, .30, 80, 45,  1, 52.3648, 1507.2655, 1.577010;
-    11, .30, 80, 90, -1, 43.2283, 1328.7400, 1.281160;
-    12, .35, 80,  0, -1, 47.3031,  896.7620, 1.477630;
-    14, .40, 80, 90,  1, 30.9396, 1023.4895, 0.923273];
-
-assert(all(ismember(Data10(:,5),[-1,1])) && all(ismember(Data15(:,5),[-1,1])), ...
-    '图案编码必须为-1（三角形）或+1（蜂窝）。');
-
-fprintf('10%% CF：拉伸筛选后进入弯曲建模的候选点数：%d\n',size(Data10,1));
-fprintf('15%% CF：拉伸筛选后进入弯曲建模的候选点数：%d\n',size(Data15,1));
-fprintf('说明：被拉伸试验筛除的工艺不作为弯曲阶段的缺失数据，也不进入弯曲优化候选域。\n\n');
-
-X10 = buildX(Data10(:,2),Data10(:,3),Data10(:,4),Data10(:,5));
-X15 = buildX(Data15(:,2),Data15(:,3),Data15(:,4),Data15(:,5));
-Y10 = Data10(:,6:8);
-Y15 = Data15(:,6:8);
-
-% 物理审查点：只检查拉伸筛选后保留的候选工艺，避免被淘汰组合影响弯曲模型。
-Xcheck = {X10, X15};
-
-%% 2. 模型筛选与诊断
-% 超小样本约束：最终模型至少保留5个残差自由度，且最多保留6个参数项。
-% 这些限制用于防止少量设计点下保留过多二次项和交互项。
-minDf = 5;
-maxTerms = 6;
-enforcePositive = true;
-enforceHeredity = true;
-nResp = 3;
-respNames = {'Flexural strength (MPa)','Flexural modulus (MPa)', ...
-    'Flexural toughness (kJ/m^2)'};
-
-betaUse = cell(2,nResp);
-statsUse = cell(2,nResp);
-datasets = {X10,Y10; X15,Y15};
-materialNames = {'10% CF','15% CF'};
-
-for m = 1:2
-    X = datasets{m,1}; Y = datasets{m,2};
-    for j = 1:nResp
-        y = Y(:,j);
-        [b,st] = selectModel(X,y,Xcheck{m},minDf,maxTerms,enforcePositive,enforceHeredity,0);
-        if ~st.selected
-            warning('%s %s未找到满足正值约束的模型，改用无正值约束模型。', ...
-                materialNames{m},respNames{j});
-            [b,st] = selectModel(X,y,Xcheck{m},minDf,maxTerms,false,enforceHeredity,0);
+if nargin < 1 || isempty(dataFile), dataFile = '论文初稿0811.docx'; end
+if nargin < 2 || isempty(cfg), cfg = struct(); end
+cfg = defaults(cfg);
+dataFile = resolveInput(dataFile);
+D = readInput(dataFile,cfg);
+validateInput(D,cfg);
+if ~exist(cfg.OutDir,'dir'), mkdir(cfg.OutDir); end
+writetable(D,fullfile(cfg.OutDir,'imported_condition_means.csv'));
+results = struct('Config',cfg,'Data',D,'Source',char(dataFile));
+results.Version = '2026-11-02-total';
+results.PrimaryScenario = 'all';
+results.ResponseUnits = {'MPa','MPa','MJ/m^3 (integration must be checked)'};
+results.Scope = ['Condition means; internal CV; conditional model inference; ', ...
+    'no specimen-level error estimate or external validation is inferred.'];
+terms = {'Intercept','Layer','Density','Angle','Pattern','Layer2', ...
+    'Density2','Angle2','LayerDensity','LayerAngle','DensityAngle', ...
+    'LayerPattern','DensityPattern','AnglePattern'};
+responseNames = {'FlexStrength','FlexModulus','FlexToughness'};
+cfLevels = unique(D.CF)';
+allDiagnostics = table();
+studySummary = table();
+for mi = 1:numel(cfLevels)
+    cf = cfLevels(mi); B = D(D.CF==cf,:);
+    Yref = B{:,responseNames};
+    [Zref,Cref,bounds] = greyCoefficients(Yref,cfg.Zeta,[]);
+    [W,Wcritic] = chooseWeights(Zref,cfg);
+    R = struct('CF',cf,'Weights',W,'CRITICWeights',Wcritic, ...
+        'NormalizationBounds',bounds,'Correlation',corrcoef(Yref), ...
+        'all',[],'screened',[],'SuggestedAugmentation',[]);
+    weightTable = table();
+    weightTable.Objective = responseNames';
+    weightTable.UsedWeight = W'; weightTable.CRITICWeight = Wcritic';
+    writetable(weightTable,fullfile(cfg.OutDir,sprintf('CF%g_weights.csv',cf)));
+    scenarios = {'all'};
+    if any(ismember(B.GroupID,cfg.LegacyExcludedIDs)), scenarios{end+1}='screened'; end
+    for si = 1:numel(scenarios)
+        name = scenarios{si}; keep = true(height(B),1);
+        if strcmp(name,'screened'), keep = ~ismember(B.GroupID,cfg.LegacyExcludedIDs); end
+        T = B(keep,:); n = height(T);
+        assert(n>=7+cfg.MinCVResidualDF, ...
+            'Insufficient unique conditions for the declared main effects and nested CV residual DF.');
+        tag = sprintf('CF%g_%s',cf,name); X = features(T,cfg);
+        Y = T{:,responseNames};
+        eligible = logical(T.CandidateEligible) & ~ismember(T.GroupID,cfg.CandidateExcludedIDs);
+        if any(isfinite(cfg.MinTensile))
+            A = T{:,{'TensileStrength','TensileModulus','TensileToughness'}};
+            required = isfinite(cfg.MinTensile);
+            assert(all(all(isfinite(A(:,required)))), ...
+                'Tensile constraints require actual tensile results.');
+            eligible = eligible & all(A(:,required)>=cfg.MinTensile(required),2);
         end
-
-        % 固定最终模型的PRESS诊断
-        st = diagnoseModel(X,y,b,st.keep,termNames);
-
-        % 严格嵌套LOO：每个外层训练集重新筛选模型
-        [q2Nested,rmseNested,yNested] = nestedLOO( ...
-            X,y,Xcheck{m},minDf,maxTerms,enforcePositive,enforceHeredity);
-        st.Q2_nested = q2Nested;
-        st.RMSE_nested = rmseNested;
-        st.y_nested = yNested;
-        st.Q2_status = q2Nested >= 0.50;
-
-        betaUse{m,j} = b;
-        statsUse{m,j} = st;
-
-        fprintf('%s %-24s: terms=%d, df=%d, rank=%d, cond=%.2e, Q2_fixed=%.3f, Q2_nested=%.3f, RMSE_nested=%.3f', ...
-            materialNames{m},respNames{j},sum(st.keep),st.df,st.rank,st.condNumber, ...
-            st.Q2,st.Q2_nested,st.RMSE_nested);
-        if st.Q2_status
-            fprintf('  [predictive status: acceptable]\n');
-        else
-            fprintf('  [predictive status: weak]\n');
-        end
-    end
-end
-
-%% 3. 输出最终保留项及p值（p值仅用于解释，不作为唯一选模标准）
-fprintf('\n===== 最终模型保留项与p值 =====\n');
-for m = 1:2
-    for j = 1:nResp
-        st = statsUse{m,j};
-        fprintf('\n%s - %s\n',materialNames{m},respNames{j});
-        fprintf('  diagnostics: n=%d, terms=%d, df=%d, rank=%d, cond=%.2e, max leverage=%.3f, AICc=%.3f\n', ...
-            st.n,st.p,st.df,st.rank,st.condNumber,max(st.leverage),st.AICc);
-        fprintf('  note: p-values are exploratory post-selection values, not confirmatory inference.\n');
-        for k = find(st.keep(:))'
-            fprintf('  %-18s beta=% .6g, p=% .4g\n',termNames{k},st.beta(k),st.pValue(k));
-        end
-    end
-end
-
-%% 4. LOO预测图与残差诊断图
-figure('Color','w','Name','LOO prediction and residual diagnostics','Position',[80 80 1350 820]);
-for m = 1:2
-    X = datasets{m,1}; Y = datasets{m,2};
-    for j = 1:nResp
-        st = statsUse{m,j};
-        subplot(4,3,(m-1)*6+j);
-        plot(1:length(Y),Y(:,j),'ko-','LineWidth',1.2,'MarkerFaceColor','k'); hold on;
-        plot(1:length(Y),st.y_nested,'rs--','LineWidth',1.2,'MarkerFaceColor','w');
-        xlabel('Design point'); ylabel(respNames{j});
-        title(sprintf('%s %s: nested Q^2=%.2f, RMSE=%.3g', ...
-            materialNames{m},respNames{j},st.Q2_nested,st.RMSE_nested),'Interpreter','none');
-        legend('Measured','Nested LOO','Location','best'); grid on;
-
-        subplot(4,3,(m-1)*6+3+j);
-        plot(st.yFit,st.residual,'ko','MarkerFaceColor',[.2 .5 .8]); hold on;
-        yline(0,'k-'); yline(2*st.sigma,'k--'); yline(-2*st.sigma,'k--');
-        xlabel('Fitted value'); ylabel('Residual');
-        title(sprintf('%s %s: residual vs fitted',materialNames{m},respNames{j}), ...
-            'Interpreter','none'); grid on;
-    end
-end
-
-%% 5. 拉伸筛选后候选工艺内的多响应搜索
-% 当前权重应在优化前预先确定；不要仅为了改变最优点而事后调权重。
-% 已有弯曲实测组的最终排序采用实测GRG；模型GRG只用于比较模型趋势。
-% 不再对完整连续矩形域进行优化，避免产生未经拉伸筛选和弯曲确认的组合。
-W = [0.277,0.534,0.189];
-zeta = 0.5;
-candidateData = {Data10,Data15};
-
-for m = 1:2
-    Dcandidate = candidateData{m};
-    [~,ia] = unique(Dcandidate(:,2:5),'rows','stable');
-    Dcandidate = Dcandidate(ia,:);
-    candidateID = Dcandidate(:,1);
-    XphysRaw = Dcandidate(:,2:5);
-    Xgrid = buildX(XphysRaw(:,1),XphysRaw(:,2),XphysRaw(:,3),XphysRaw(:,4));
-    Ymodel = zeros(size(Xgrid,1),nResp);
-    Hgrid = zeros(size(Xgrid,1),nResp);
-    for j = 1:nResp
-        b = betaUse{m,j}; st = statsUse{m,j};
-        Ymodel(:,j) = Xgrid(:,st.keep)*b(st.keep);
-        Hgrid(:,j) = sum((Xgrid(:,st.keep)*st.invXtX).*Xgrid(:,st.keep),2);
-    end
-
-    % 仅用物理可行且杠杆值不极端的候选点进行模型GRG参考排序。
-    valid = all(Ymodel>=0,2) & max(Hgrid,[],2)<=3.0;
-    fprintf('\n%s拉伸筛选后候选域有效点数：%d/%d\n', ...
-        materialNames{m},sum(valid),size(Xgrid,1));
-
-    % ---------- A. 实测GRG：用于最终已测试候选组排序 ----------
-    Ymeas = Dcandidate(:,6:8);
-    [GRGmeas,~,~] = computeGRG(Ymeas,W,zeta);
-    [GMs,ixm] = sort(GRGmeas,'descend');
-    fprintf('%s Top-5实测GRG保留工艺（最终排序依据）：\n',materialNames{m});
-    for k = 1:min(5,length(ixm))
-        p = Dcandidate(ixm(k),2:5);
-        label = patternLabel(p(4));
-        fprintf('Measured Top%d (ID%d): layer=%.3f mm, density=%.1f%%, angle=%.1f deg, pattern=%s, GRG=%.4f\n', ...
-            k,Dcandidate(ixm(k),1),p(1),p(2),p(3),label,GMs(k));
-        fprintf('     measured: strength=%.3f, modulus=%.3f, toughness=%.3f\n', ...
-            Ymeas(ixm(k),1),Ymeas(ixm(k),2),Ymeas(ixm(k),3));
-    end
-
-    % ---------- B. 模型GRG：仅作为辅助趋势参考 ----------
-    Yv = Ymodel(valid,:);
-    Xv = XphysRaw(valid,:);
-    ymin = min(Yv,[],1); ymax = max(Yv,[],1);
-    scale = max(ymax-ymin,eps);
-    Z = (Yv-ymin)./scale;
-    GRC = zeta./(1-Z+zeta);
-    GRG = GRC*W(:);
-    [GRGsort,ix] = sort(GRG,'descend');
-
-    fprintf('%s Top-5模型GRG参考排序（非最终结论）：\n',materialNames{m});
-    for k = 1:min(5,length(ix))
-        p = Xv(ix(k),:);
-        id = candidateID(valid);
-        id = id(ix(k));
-        label = patternLabel(p(4));
-        fprintf('Model Top%d (ID%d): layer=%.3f mm, density=%.1f%%, angle=%.1f deg, pattern=%s, GRG=%.4f\n', ...
-            k,id,p(1),p(2),p(3),label,GRGsort(k));
-        fprintf('     prediction: strength=%.3f, modulus=%.3f, toughness=%.3f\n', ...
-            Yv(ix(k),1),Yv(ix(k),2),Yv(ix(k),3));
-    end
-end
-
-%% 6. 分类变量的直接主效应计算
-% 在指定连续参数下比较蜂窝(+1)与三角形(-1)，不对图案进行连续插值。
-t0 = .30; rho0 = 80; ang0 = 0;
-fprintf('\n===== 指定工艺点的图案效应 =====\n');
-for m = 1:2
-    fprintf('%s: layer=%.2f, density=%.1f, angle=%.1f\n', ...
-        materialNames{m},t0,rho0,ang0);
-    for j = 1:nResp
-        st = statsUse{m,j}; b = betaUse{m,j};
-        Xtri = buildX(t0,rho0,ang0,-1);
-        Xhon = buildX(t0,rho0,ang0,+1);
-        ytri = Xtri(:,st.keep)*b(st.keep);
-        yhon = Xhon(:,st.keep)*b(st.keep);
-        fprintf('  %-24s Triangle=%.4f, Honeycomb=%.4f, Delta=%.4f\n', ...
-            respNames{j},ytri,yhon,yhon-ytri);
-    end
-end
-
-%% 7. 外部确认试验接口
-% 将NaN替换为确认试验的5根平行试件平均值。
-% 当前若只有三角形确认试验，则只能验证三角形工艺点；
-% 若要验证图案主效应，应增加同一工艺点下的蜂窝对照。
-% 列顺序：[layer density angle pattern strength modulus toughness]
-Validation10 = [ ...
-    .30,80,0,-1,NaN,NaN,NaN; ... % 三角形，已完成的确认点
-    .30,80,0,+1,NaN,NaN,NaN];    % 蜂窝，若要验证图案效应需补做
-Validation15 = [ ...
-    .30,80,0,-1,NaN,NaN,NaN; ... % 三角形，已完成的确认点
-    .30,80,0,+1,NaN,NaN,NaN];    % 蜂窝，若要验证图案效应需补做
-
-fprintf('\n===== 外部确认试验预测 =====\n');
-validateTable(Validation10,1,@buildX,betaUse,statsUse,respNames);
-validateTable(Validation15,2,@buildX,betaUse,statsUse,respNames);
-fprintf('\n===== 外部确认试验实测GRG（仅在填入实测均值后计算） =====\n');
-reportValidationGRG(Validation10,Data10,'10% CF',W,zeta);
-reportValidationGRG(Validation15,Data15,'15% CF',W,zeta);
-
-%% 8. 条件响应面可视化：仅展示固定角度0°的切片
-% 该图用于展示保留工艺子空间内的趋势，不用于重新扩大弯曲优化域。
-% 最终候选排序以第5节的实际保留工艺点为准。
-[S1,S2] = meshgrid(linspace(.30,.40,40),linspace(40,80,40));
-Xtri = buildX(S1(:),S2(:),zeros(numel(S1),1),-ones(numel(S1),1));
-Xhon = buildX(S1(:),S2(:),zeros(numel(S1),1), ones(numel(S1),1));
-
-figure('Color','w','Name','Discrete pattern response surfaces','Position',[50 50 1550 900]);
-for m = 1:2
-    for j = 1:nResp
-        st = statsUse{m,j}; b = betaUse{m,j};
-        ztri = reshape(Xtri(:,st.keep)*b(st.keep),size(S1));
-        zhon = reshape(Xhon(:,st.keep)*b(st.keep),size(S1));
-        k = (m-1)*nResp+j;
-        subplot(2,3,k);
-        surf(S1,S2,ztri,'EdgeColor','none','FaceAlpha',.9); hold on;
-        mesh(S1,S2,zhon,'FaceColor','none','EdgeColor',[.1 .1 .1]);
-        xlabel('Layer thickness (mm)'); ylabel('Density (%)'); zlabel(respNames{j});
-        title(sprintf('%s: conditional %s, angle=0 deg',materialNames{m},respNames{j}), ...
-            'Interpreter','none');
-        legend('Triangle (-1)','Honeycomb (+1)','Location','best'); grid on; view([-40 25]);
-    end
-end
-
-fprintf('\n完成：所有拉伸筛选后保留的弯曲数据均已使用；图案仅按-1/+1两个离散水平处理；\n');
-fprintf('已测试候选组的最终排序采用实测GRG，模型GRG仅作辅助；确认试验与模型拟合保持分离。\n');
-
-%% ====================== 局部函数 ======================
-function X = buildX(x1,x2,x3,x4)
-    u1 = (x1-.35)./.05;
-    u2 = (x2-60)./20;
-    u3 = (x3-45)./45;
-    X = [ones(size(x1)),u1,u2,u3,x4,u1.^2,u2.^2,u3.^2, ...
-        u1.*u2,u1.*u3,u2.*u3,u1.*x4,u2.*x4,u3.*x4];
-end
-
-function label = patternLabel(p)
-    if p == -1
-        label = 'Triangle';
-    elseif p == 1
-        label = 'Honeycomb';
-    else
-        error('Invalid pattern code: %g',p);
-    end
-end
-
-function [beta,st] = selectModel(X,y,Xcheck,minDf,maxTerms,enforcePositive,enforceHeredity,yFloor)
-    n = size(X,1); nTerms = size(X,2);
-    bestPRESS = Inf; beta = zeros(nTerms,1); bestKeep = false(nTerms,1);
-    for mask = 0:(2^(nTerms-1)-1)
-        bits = dec2bin(mask,nTerms-1)-'0';
-        keep = [true, logical(bits)];
-        p = sum(keep); df = n-p;
-        if df < minDf, continue; end
-        if p > maxTerms, continue; end
-        if enforceHeredity && ~checkHeredity(keep), continue; end
-        Xs = X(:,keep);
-        if rank(Xs) < p, continue; end
-        % 排除数值上严重病态的设计子矩阵。
-        if cond(Xs'*Xs) > 1e8, continue; end
-        XtXinv = pinv(Xs'*Xs);
-        bsub = XtXinv*Xs'*y;
-        if enforcePositive && any(Xcheck(:,keep)*bsub < yFloor), continue; end
-        e = y-Xs*bsub;
-        h = sum((Xs*XtXinv).*Xs,2);
-        if any(h>=.99), continue; end
-        PRESS = sum((e./(1-h)).^2);
-        % PRESS相同或非常接近时优先保留项更少的模型
-        if PRESS < bestPRESS-1e-10 || ...
-                (abs(PRESS-bestPRESS)<=1e-10 && p<sum(bestKeep))
-            bestPRESS = PRESS; beta=zeros(nTerms,1); beta(keep)=bsub; bestKeep=keep;
-        end
-    end
-    st = struct('selected',any(bestKeep),'keep',bestKeep);
-end
-
-function ok = checkHeredity(keep)
-    % 主效应索引：2,3,4,5；二次项6,7,8；交互项9:14
-    ok = true;
-    if keep(6) && ~keep(2), ok=false; return; end
-    if keep(7) && ~keep(3), ok=false; return; end
-    if keep(8) && ~keep(4), ok=false; return; end
-    pairs = [2 3 9; 2 4 10; 3 4 11; 2 5 12; 3 5 13; 4 5 14];
-    for i=1:size(pairs,1)
-        if keep(pairs(i,3)) && (~keep(pairs(i,1)) || ~keep(pairs(i,2)))
-            ok=false; return;
-        end
-    end
-end
-
-function st = diagnoseModel(X,y,beta,keep,termNames)
-    Xs = X(:,keep); b = beta(keep); n=size(X,1); p=sum(keep); df=n-p;
-    invXtX = pinv(Xs'*Xs); yfit=Xs*b; e=y-yfit;
-    h=sum((Xs*invXtX).*Xs,2); sigma=sqrt(sum(e.^2)/max(df,1));
-    eLoo=e./max(1-h,eps); PRESS=sum(eLoo.^2); SST=sum((y-mean(y)).^2);
-    st.keep=keep; st.beta=beta; st.invXtX=invXtX; st.df=df;
-    st.rank=rank(Xs); st.condNumber=cond(Xs'*Xs); st.n=n; st.p=p;
-    st.yFit=yfit; st.residual=e; st.leverage=h; st.sigma=sigma; st.s=sigma;
-    st.e_loo=eLoo; st.Q2=1-PRESS/max(SST,eps); st.RMSE_loo=sqrt(PRESS/n);
-    st.AICc = n*log(max(sum(e.^2)/n,eps)) + 2*p + (2*p*(p+1))/max(n-p-1,1);
-    st.pValue=nan(size(beta));
-    if df>0
-        se=sigma*sqrt(max(diag(invXtX),0)); t=b./max(se,eps);
-        st.pValue(keep)=2*tcdf(-abs(t),df);
-    end
-end
-
-function [yhat,lo,hi] = predictWithPI(Xnew,st,beta)
-    % 95%%预测区间：包含新观测的随机误差项，因此比均值置信区间更宽。
-    Xs = Xnew(:,st.keep);
-    yhat = Xs*beta(st.keep);
-    hnew = sum((Xs*st.invXtX).*Xs,2);
-    if st.df > 0 && isfinite(st.sigma)
-        tcrit = tinv(0.975,st.df);
-        sePred = st.sigma*sqrt(max(1+hnew,0));
-        lo = yhat-tcrit*sePred;
-        hi = yhat+tcrit*sePred;
-    else
-        lo = nan(size(yhat)); hi = nan(size(yhat));
-    end
-end
-
-function [GRG,ymin,ymax] = computeGRG(Y,W,zeta)
-    % Larger-the-better grey relational grade.
-    ymin = min(Y,[],1);
-    ymax = max(Y,[],1);
-    scale = max(ymax-ymin,eps);
-    Z = (Y-ymin)./scale;
-    GRC = zeta./(1-Z+zeta);
-    GRG = GRC*W(:);
-end
-
-function [q2,rmse,yPred] = nestedLOO(X,y,Xcheck,minDf,maxTerms,enforcePositive,enforceHeredity)
-    n=size(X,1); yPred=nan(n,1);
-    for i=1:n
-        train=true(n,1); train(i)=false;
-        yTrain=y(train); XTrain=X(train,:);
-        yFloor=0;
-        % 外层留一时，正值约束只使用外层训练集，避免将被留出的试验点
-        % 提前用于模型筛选。
-        [b,st]=selectModel(XTrain,yTrain,XTrain,minDf,maxTerms,enforcePositive,enforceHeredity,yFloor);
-        if ~st.selected
-            [b,st]=selectModel(XTrain,yTrain,XTrain,minDf,maxTerms,false,enforceHeredity,yFloor);
-        end
-        yPred(i)=X(i,st.keep)*b(st.keep);
-    end
-    PRESS=sum((y-yPred).^2); SST=sum((y-mean(y)).^2);
-    q2=1-PRESS/max(SST,eps); rmse=sqrt(PRESS/n);
-end
-
-function validateTable(V,matIdx,buildX,betaUse,statsUse,respNames)
-    if isempty(V), return; end
-    Xv=buildX(V(:,1),V(:,2),V(:,3),V(:,4));
-    fprintf('\nMaterial %d validation:\n',matIdx);
-    for j=1:3
-        st=statsUse{matIdx,j}; b=betaUse{matIdx,j};
-        [yp,lo,hi]=predictWithPI(Xv,st,b);
-        fprintf('%s predictions: ',respNames{j}); fprintf('%.4g ',yp); fprintf('\n');
-        fprintf('  95%% PI lower: '); fprintf('%.4g ',lo); fprintf('\n');
-        fprintf('  95%% PI upper: '); fprintf('%.4g ',hi); fprintf('\n');
-        for r=1:size(V,1)
-            if ~isnan(V(r,4+j))
-                err=abs(V(r,4+j)-yp(r))./max(abs(yp(r)),eps)*100;
-                fprintf('  row%d measured=%.4g, relative error=%.2f%%\n', ...
-                    r,V(r,4+j),err);
+        [~,C,~] = greyCoefficients(Y,cfg.Zeta,bounds);
+        [~,Clocal,~] = greyCoefficients(Y,cfg.Zeta,[]);
+        ranking = T;
+        ranking.CandidateEligible = eligible;
+        ranking.GRG_CommonReference = C*W';
+        ranking.GRG_LocalReference = Clocal*W';
+        ranking.ParetoEligible = false(n,1);
+        ranking.ParetoEligible(eligible) = paretoMax(Y(eligible,:));
+        ranking = sortrows(ranking,{'CandidateEligible','GRG_CommonReference'},{'descend','descend'});
+        studySummary=appendTable(studySummary,summarizeScenario(cf,name,ranking,X));
+        writetable(ranking,fullfile(cfg.OutDir,[tag '_measured_ranking.csv']));
+        sensitivity = weightSensitivity(C(eligible,:),T.GroupID(eligible));
+        writetable(sensitivity,fullfile(cfg.OutDir,[tag '_weight_sensitivity.csv']));
+        design = designAudit(X,terms);
+        writetable(design.Summary,fullfile(cfg.OutDir,[tag '_design_rank.csv']));
+        writetable(design.AliasBasis,fullfile(cfg.OutDir,[tag '_alias_nullspace.csv']));
+        % Fixed budget across inner/outer folds within this domain. minDf is
+        % an explicit modeling choice, NOT a universal publication standard.
+        budget = min(cfg.MaxParameters,n-2-cfg.MinCVResidualDF);
+        assert(budget>=5,'Too few conditions for the predeclared main-effects model.');
+        pool = candidatePool(budget,cfg.MaxExtraTerms);
+        models = cell(1,3); diagnostics = table(); anovaRows = table();
+        for j = 1:3
+            y = Y(:,j);
+            base = fitModel(X,y,1:5);
+            assert(base.Valid,'The main-effects design is not independently estimable.');
+            selected = selectModel(X,y,pool);
+            nested = nan(n,1); foldKeep = cell(n,1);
+            for ii = 1:n
+                train = true(n,1); train(ii)=false;
+                fold = selectModel(X(train,:),y(train),pool);
+                nested(ii)=X(ii,fold.keep)*fold.beta;
+                foldKeep{ii}=fold.keep;
             end
+            selected.NestedPrediction = nested; selected.FoldTerms = foldKeep;
+            selected.MainEffects = base;
+            selected.Q2Nested = q2(y,nested);
+            selected.RMSENested = sqrt(mean((y-nested).^2));
+            baselineLOO = (sum(y)-y)/(n-1);
+            selected.Q2VsLOOMean = 1-sum((y-nested).^2)/sum((y-baselineLOO).^2);
+            models{j} = selected;
+            d = table(); d.CF=cf; d.Scenario={name}; d.Response=responseNames(j);
+            d.N=n; d.SelectedParameters=numel(selected.keep); d.ResidualDF=selected.df;
+            d.DesignFullRank=design.Rank; d.R2=selected.R2; d.AdjustedR2=selected.AdjustedR2;
+            d.Q2FixedSelected=q2(y,selected.loo);
+            d.Q2Nested=selected.Q2Nested; d.Q2VsLOOMean=selected.Q2VsLOOMean;
+            d.RMSENested=selected.RMSENested; d.Q2MainEffects=q2(y,base.loo);
+            d.RMSEMainEffects=sqrt(mean((y-base.loo).^2));
+            d.MaxLeverage=max(selected.h); d.ConditionNumber=selected.condX;
+            d.BetterThanLOOMean=(selected.Q2VsLOOMean>0);
+            limit=cfg.MaxAcceptableCVRMSE(j);
+            d.MeetsConfiguredEngineeringRMSE=isfinite(limit) && limit>0 && selected.RMSENested<=limit;
+            d.Terms={strjoin(terms(selected.keep),' + ')};
+            d.InnerCVResidualDFMinimum=n-2-numel(selected.keep);
+            diagnostics=appendTable(diagnostics,d);
+            coefficients = coefficientTable(selected,terms);
+            writetable(coefficients,fullfile(cfg.OutDir,[tag '_' responseNames{j} '_coefficients.csv']));
+            pred = table(); pred.GroupID=T.GroupID; pred.Observed=y;
+            pred.Fitted=selected.fit; pred.FixedModelLOO=selected.loo;
+            pred.NestedLOO=nested; pred.MainEffectsLOO=base.loo;
+            pred.Residual=y-selected.fit; pred.Leverage=selected.h;
+            pred.InternallyStudentized=selected.studentized;
+            pred.CooksDistance=selected.cooks;
+            pred.OuterFoldTerms=cellfun(@(k)strjoin(terms(k),'+'),foldKeep,'UniformOutput',false);
+            writetable(pred,fullfile(cfg.OutDir,[tag '_' responseNames{j} '_predictions.csv']));
+            freq = zeros(14,1);
+            for ii=1:n, freq(foldKeep{ii})=freq(foldKeep{ii})+1; end
+            tf = table(); tf.Term=terms'; tf.OuterFoldFrequency=freq/n;
+            writetable(tf,fullfile(cfg.OutDir,[tag '_' responseNames{j} '_term_stability.csv']));
+            % Planned additive quadratic ANOVA: four grouped partial F tests.
+            % Error is model residual on condition means, NOT pure error.
+            ar = plannedAnova(X,y,responseNames{j});
+            anovaRows=appendTable(anovaRows,ar);
         end
+        if ~isempty(anovaRows), anovaRows.Q_BH=bhAdjust(anovaRows.P_ModelConditional); end
+        writetable(anovaRows,fullfile(cfg.OutDir,[tag '_planned_ANOVA.csv']));
+        writetable(diagnostics,fullfile(cfg.OutDir,[tag '_model_diagnostics.csv']));
+        allDiagnostics=appendTable(allDiagnostics,diagnostics);
+        G = predictionGrid(B,cfg);
+        proposals = predictGrid(G,T,B,models,bounds,W,cfg);
+        writetable(proposals,fullfile(cfg.OutDir,[tag '_UNCONFIRMED_grid_predictions.csv']));
+        external = externalCheck(cfg.ConfirmationFile,cf,T,models,cfg);
+        if ~isempty(external)
+            writetable(external,fullfile(cfg.OutDir,[tag '_external_confirmation.csv']));
+        end
+        S = struct('Data',T,'Ranking',ranking,'Design',design,'Models',{models}, ...
+            'Diagnostics',diagnostics,'ANOVA',anovaRows,'WeightSensitivity',sensitivity, ...
+            'UnconfirmedCandidates',proposals,'ExternalConfirmation',external);
+        R.(name)=S;
+        if cfg.MakeFigures, drawDiagnostics(T,models,responseNames,tag,cfg); end
+        fprintf('\n%s: full quadratic rank %d/14; observed eligible Pareto IDs: ',tag,design.Rank);
+        fprintf('%g ',ranking.GroupID(ranking.ParetoEligible)); fprintf('\n');
+        disp(diagnostics(:,{'Response','Q2MainEffects','Q2Nested','RMSENested','Terms'}));
     end
+    augmentation = augmentDesign(B,cfg);
+    writetable(augmentation,fullfile(cfg.OutDir,sprintf('CF%g_suggested_design_augmentation.csv',cf)));
+    R.SuggestedAugmentation=augmentation;
+    if cfg.MakeFigures, drawObserved(B,Zref,Cref,W,cf,cfg); end
+    results.Material(mi)=R;
+end
+results.Diagnostics=allDiagnostics;
+results.Summary=studySummary;
+writetable(allDiagnostics,fullfile(cfg.OutDir,'all_model_diagnostics.csv'));
+writetable(studySummary,fullfile(cfg.OutDir,'study_summary.csv'));
+save(fullfile(cfg.OutDir,'analysis_results.mat'),'results');
+writeNotes(cfg.OutDir,cfg);
+fprintf('\nSaved to %s\n',cfg.OutDir);
+disp(studySummary);
+fprintf('A high fitted R2 does not certify prediction. Grid results remain unconfirmed.\n');
 end
 
-function reportValidationGRG(V,D,name,W,zeta)
-    if isempty(V), return; end
-    ok = all(~isnan(V(:,5:7)),2);
-    if ~any(ok)
-        fprintf('%s：尚未填入确认试验实测均值，跳过实测GRG。\n',name);
-        return;
+function c = defaults(c)
+d = struct('OutDir',fullfile(pwd,'fdm_sci_results'),'MakeFigures',true,'ShowFigures',true, ...
+    'DocumentCF',[10 15],'LegacyExcludedIDs',[2 3 6 20 27],'CandidateExcludedIDs',[], ...
+    'MinTensile',[-Inf -Inf -Inf],'MaxParameters',7,'MaxExtraTerms',2, ...
+    'MinCVResidualDF',3,'WeightMode','fixed','Weights',[.277 .534 .189], ...
+    'SubjectiveWeights',[],'SubjectiveFraction',0.5,'Zeta',0.5, ...
+    'MaxAcceptableCVRMSE',[NaN NaN NaN],'ConfirmationFile','', ...
+    'AugmentationCount',5,'Center',[.35 60 45],'Scale',[.05 20 45]);
+f = fieldnames(c); known = fieldnames(d);
+assert(all(ismember(f,known)),'Unknown configuration field; check spelling.');
+for i=1:numel(known)
+    if ~isfield(c,known{i}), c.(known{i})=d.(known{i}); end
+end
+assert(c.Zeta>0 && c.Zeta<=1,'Zeta must be in (0,1].');
+assert(numel(c.Center)==3 && numel(c.Scale)==3 && all(c.Scale>0),'Invalid coding.');
+assert(numel(c.MinTensile)==3 && ~any(isnan(c.MinTensile)),'Invalid tensile constraints.');
+assert(numel(c.MaxAcceptableCVRMSE)==3,'Supply three engineering RMSE limits.');
+assert(c.MaxParameters>=5 && c.MaxParameters<=14 && c.MaxParameters==fix(c.MaxParameters),'Invalid parameter budget.');
+assert(ismember(c.MaxExtraTerms,0:2),'MaxExtraTerms must be 0, 1 or 2.');
+assert(c.MinCVResidualDF>=1 && c.MinCVResidualDF==fix(c.MinCVResidualDF),'Invalid minimum CV residual DF.');
+assert(c.AugmentationCount>=0 && c.AugmentationCount==fix(c.AugmentationCount),'Invalid augmentation count.');
+end
+
+function file = resolveInput(file)
+assert(ischar(file) || (isstring(file) && isscalar(file)), ...
+    'Input must be one DOCX or CSV filename.');
+file=char(file);
+if isfile(file), return; end
+besideProgram=fullfile(fileparts(mfilename('fullpath')),file);
+if isfile(besideProgram), file=besideProgram; return; end
+if usejava('desktop')
+    [name,folder]=uigetfile({'*.docx;*.csv','DOCX manuscript or CSV condition means'}, ...
+        'Select experimental data');
+    if isequal(name,0)
+        error('revised1031:InputCancelled','No input selected. Run revised1031 with an explicit DOCX/CSV path.');
     end
-    Vok = V(ok,:);
-    % 确认点不参与模型拟合，仅在最终实测候选比较中追加。
-    Dconfirm = [900+(1:size(Vok,1))', Vok(:,1:7)];
-    Dall = [D;Dconfirm];
-    [g,~,~] = computeGRG(Dall(:,6:8),W,zeta);
-    [gs,ix] = sort(g,'descend');
-    fprintf('%s：加入确认点后的实测GRG排序：\n',name);
-    for k=1:min(5,length(ix))
-        p=Dall(ix(k),2:5);
-        if ix(k)<=size(D,1)
-            idText=sprintf('ID%d',Dall(ix(k),1));
-        else
-            idText=sprintf('Confirm-%d',ix(k)-size(D,1));
+    file=fullfile(folder,name);
+else
+    error('revised1031:MissingInput','Input file not found: %s. Supply its complete DOCX/CSV path.',file);
+end
+end
+
+function D = readInput(file,c)
+[~,~,ext] = fileparts(file);
+if strcmpi(ext,'.docx')
+    D = readDocxMeans(file,c.DocumentCF);
+else
+    D = readtable(file,'TextType','string');
+end
+required = {'GroupID','CF','Layer','Density','Angle','Pattern','FlexStrength','FlexModulus','FlexToughness'};
+assert(all(ismember(required,D.Properties.VariableNames)), ...
+    'Missing required columns. See the header of fdm_sci_revision.m.');
+if ~isnumeric(D.Pattern)
+    p = lower(strtrim(string(D.Pattern))); code=nan(height(D),1);
+    code(ismember(p,["triangle","triangular","-1"]))=-1;
+    code(ismember(p,["honeycomb","1","+1"]))=1; D.Pattern=code;
+end
+optional = {'TensileStrength','TensileModulus','TensileToughness'};
+for i=1:3
+    if ~ismember(optional{i},D.Properties.VariableNames), D.(optional{i})=nan(height(D),1); end
+end
+if ~ismember('CandidateEligible',D.Properties.VariableNames), D.CandidateEligible=true(height(D),1); end
+end
+
+function D = readDocxMeans(file,levels)
+assert(usejava('jvm'),'DOCX import requires a JVM; alternatively supply a CSV.');
+tmp = tempname; mkdir(tmp); cleanup=onCleanup(@()rmdir(tmp,'s')); %#ok<NASGU>
+unzip(file,tmp); doc=xmlread(fullfile(tmp,'word','document.xml'));
+tables=doc.getElementsByTagName('w:tbl'); data=[]; tableCount=0;
+for it=0:tables.getLength-1
+    rows=tables.item(it).getElementsByTagName('w:tr'); block=[];
+    for ir=0:rows.getLength-1
+        cells=rows.item(ir).getElementsByTagName('w:tc');
+        if cells.getLength~=11, continue; end
+        v=cell(1,11);
+        for ic=0:10
+            tt=cells.item(ic).getElementsByTagName('w:t'); text='';
+            for k=0:tt.getLength-1, text=[text char(tt.item(k).getTextContent)]; end %#ok<AGROW>
+            v{ic+1}=strtrim(text);
         end
-        fprintf('  Rank%d (%s): layer=%.3f mm, density=%.1f%%, angle=%.1f deg, pattern=%s, GRG=%.4f\n', ...
-            k,idText,p(1),p(2),p(3),patternLabel(p(4)),gs(k));
+        id=str2double(v{1}); pat=lower(v{5});
+        if ~isfinite(id) || ~ismember(string(pat),["triangle","honeycomb"]), continue; end
+        p=-1; if strcmp(pat,'honeycomb'), p=1; end
+        nums=cellfun(@str2double,v([1 2 3 4 6 7 8 9 10 11]));
+        assert(all(isfinite(nums)),'Non-numeric value in a recognized experimental table.');
+        block=[block;nums(1:4),p,nums(5:10)]; %#ok<AGROW>
     end
+    if isempty(block), continue; end
+    tableCount=tableCount+1;
+    assert(tableCount<=numel(levels),'More matching tables than DocumentCF entries. Use CSV for unambiguous mapping.');
+    data=[data;block(:,1),repmat(levels(tableCount),size(block,1),1),block(:,2:end)]; %#ok<AGROW>
+end
+assert(tableCount==numel(levels),'Matching table count differs from DocumentCF; verify the two table layouts or use CSV.');
+D=array2table(data,'VariableNames',{'GroupID','CF','Layer','Density','Angle','Pattern', ...
+    'TensileStrength','TensileModulus','TensileToughness','FlexStrength','FlexModulus','FlexToughness'});
+fprintf('Imported %d condition means from %d DOCX tables; CF mapping follows DocumentCF.\n',height(D),tableCount);
+end
+
+function validateInput(D,c)
+vars={'GroupID','CF','Layer','Density','Angle','Pattern','FlexStrength','FlexModulus','FlexToughness'};
+for k=1:numel(vars), assert(isnumeric(D.(vars{k})),['Expected numeric column: ' vars{k}]); end
+A=D{:,vars}; assert(all(isfinite(A(:))),'Required inputs must be finite.');
+assert(numel(unique(D.GroupID))==height(D),'GroupID must be globally unique; use global IDs across materials.');
+assert(all(ismember(D.Pattern,[-1 1])),'Pattern must be Triangle(-1) or Honeycomb(+1).');
+assert(all(all(D{:,{'FlexStrength','FlexModulus','FlexToughness'}}>0)),'Flexural means must be positive.');
+assert(all(ismember(D.CandidateEligible,[0 1])),'CandidateEligible must be 0/1.');
+assert(all(all(abs((D{:,{'Layer','Density','Angle'}}-c.Center)./c.Scale)<=1+1e-8)), ...
+    'Data exceed configured factor bounds. Change Center/Scale explicitly for a different design.');
+assert(size(unique(D{:,{'CF','Layer','Density','Angle','Pattern'}},'rows'),1)==height(D), ...
+    'Duplicate design conditions: supply one mean per condition; keep specimen records separately.');
+end
+
+function X=features(T,c)
+u=(T{:,{'Layer','Density','Angle'}}-c.Center)./c.Scale;
+a=u(:,1); b=u(:,2); d=u(:,3); p=T.Pattern;
+X=[ones(height(T),1),u,p,a.^2,b.^2,d.^2,a.*b,a.*d,b.*d,a.*p,b.*p,d.*p];
+end
+
+function A=designAudit(X,terms)
+A.Rank=rank(X); [~,s,~]=svd(X,0); sv=diag(s);
+t=table(); t.N=size(X,1); t.Columns=14; t.Rank=A.Rank;
+t.FullQuadraticUniqueCoefficients=(A.Rank==14); t.MainEffectsRank=rank(X(:,1:5));
+t.AdditiveQuadraticRank=rank(X(:,1:8));
+t.SmallestSingularValue=sv(end); A.Summary=t;
+N=null(X); z=table(); z.Term=terms';
+for i=1:size(N,2), z.(sprintf('AliasBasis%d',i))=N(:,i); end
+A.AliasBasis=z; A.NullSpace=N;
+end
+
+function pool=candidatePool(budget,maxExtra)
+pool={1,1:5}; extras=6:14;
+for count=1:maxExtra
+    if 5+count>budget, continue; end
+    combinations=nchoosek(extras,count);
+    for i=1:size(combinations,1), pool{end+1}=[1:5 combinations(i,:)]; end %#ok<AGROW>
+end
+% All nonlinear terms retain their main-effect parents (strong heredity).
+end
+
+function m=fitModel(X,y,keep)
+A=X(:,keep); [Q,R]=qr(A,0); p=numel(keep); n=numel(y);
+m=struct('Valid',false,'keep',keep);
+if rank(A)<p || n<=p || cond(R)>1e8, return; end
+m.Valid=true; m.beta=R\(Q'*y); m.fit=A*m.beta; m.residual=y-m.fit;
+m.h=sum(Q.^2,2); m.df=n-p; m.SSE=sum(m.residual.^2); m.MSE=m.SSE/m.df;
+m.condX=cond(R); m.R=R;
+m.loo=nan(n,1);
+if all(1-m.h>1e-9), m.loo=y-m.residual./(1-m.h); end
+m.PRESS=sum((y-m.loo).^2); if any(~isfinite(m.loo)), m.PRESS=Inf; end
+m.R2=q2(y,m.fit); m.AdjustedR2=1-(1-m.R2)*(n-1)/m.df;
+m.studentized=m.residual./sqrt(max(m.MSE,realmin)*max(1-m.h,realmin));
+m.cooks=(m.studentized.^2/p).*m.h./max(1-m.h,realmin);
+end
+
+function best=selectModel(X,y,pool)
+best=struct('Valid',false,'PRESS',Inf,'keep',1:100);
+for i=1:numel(pool)
+    m=fitModel(X,y,pool{i}); if ~m.Valid || ~isfinite(m.PRESS), continue; end
+    better=~best.Valid || m.PRESS<best.PRESS-1e-10*max(1,best.PRESS);
+    tied=best.Valid && abs(m.PRESS-best.PRESS)<=1e-10*max(1,best.PRESS);
+    if better || (tied && numel(m.keep)<numel(best.keep)), best=m; end
+end
+assert(best.Valid,'No estimable candidate model with valid inner leave-one-out predictions.');
+end
+
+function q=q2(y,p)
+sst=sum((y-mean(y)).^2);
+if sst<=eps(max(1,sum(y.^2))), q=NaN; else, q=1-sum((y-p).^2)/sst; end
+end
+
+function T=coefficientTable(m,terms)
+V=m.R\eye(numel(m.keep)); se=sqrt(max(m.MSE,0)*sum(V.^2,2));
+t=m.beta./max(se,realmin); p=betainc(m.df./(m.df+t.^2),m.df/2,.5);
+T=table(); T.Term=terms(m.keep)'; T.Estimate=m.beta; T.ConditionalSE=se;
+T.ExploratoryP_PostSelection=p;
+end
+
+function T=plannedAnova(X,y,response)
+% Additive curvature model is predeclared; interactions are omitted assumptions.
+keep=1:8; full=fitModel(X,y,keep); T=table();
+if ~full.Valid || full.df<3, return; end
+groups={[2 6],[3 7],[4 8],5}; names={'Layer_linear_and_quadratic','Density_linear_and_quadratic', ...
+    'Angle_linear_and_quadratic','Pattern'};
+for i=1:4
+    reduced=fitModel(X,y,setdiff(keep,groups{i}));
+    if ~reduced.Valid, continue; end
+    df=numel(groups{i}); ss=max(0,reduced.SSE-full.SSE);
+    if full.MSE>0, F=(ss/df)/full.MSE; elseif ss>0, F=Inf; else, F=NaN; end
+    p=betainc(full.df/(full.df+df*F),full.df/2,df/2);
+    a=table(); a.Response={response}; a.Factor=names(i); a.DF=df;
+    a.PartialSS=ss; a.F=F; a.P_ModelConditional=p;
+    a.ResidualDF=full.df; a.ResidualSS=full.SSE;
+    T=appendTable(T,a);
+end
+end
+
+function q=bhAdjust(p)
+[v,ix]=sort(p); n=numel(v); a=v.*n./(1:n)';
+for i=n-1:-1:1, a(i)=min(a(i),a(i+1)); end
+q=zeros(size(p)); q(ix)=min(1,a);
+end
+
+function [Z,C,bounds]=greyCoefficients(Y,zeta,bounds)
+if isempty(bounds), bounds=[min(Y,[],1);max(Y,[],1)]; end
+span=bounds(2,:)-bounds(1,:); spanSafe=span; spanSafe(span==0)=1;
+Z=(Y-bounds(1,:))./spanSafe; Z(:,span==0)=1;
+% Fixed ideal and range. Out-of-reference predictions are flagged upstream.
+C=zeta./(abs(1-Z)+zeta);
+end
+
+function [W,wc]=chooseWeights(Z,c)
+sd=std(Z,0,1); R=corrcoef(Z); R(~isfinite(R))=0; R(1:4:end)=1;
+information=sd.*sum(1-R,2)'; information=max(information,0);
+if sum(information)<=1e-12, wc=[1 1 1]/3; else, wc=information/sum(information); end
+switch lower(c.WeightMode)
+    case 'equal', W=[1 1 1]/3;
+    case 'fixed', W=c.Weights;
+    case 'critic', W=wc;
+    case 'blend'
+        a=c.SubjectiveFraction;
+        assert(a>=0 && a<=1,'SubjectiveFraction must be in [0,1].');
+        ws=c.SubjectiveWeights;
+        assert(numel(ws)==3 && all(ws>=0) && abs(sum(ws)-1)<1e-8, ...
+            'Supply documented subjective weights; BWM preferences are not inferred.');
+        W=a*ws(:)'+(1-a)*wc;
+    otherwise, error('WeightMode: equal, fixed, critic or blend.');
+end
+assert(numel(W)==3 && all(isfinite(W)) && all(W>=0) && abs(sum(W)-1)<1e-8,'Invalid weights.');
+W=W(:)';
+end
+
+function p=paretoMax(Y)
+p=true(size(Y,1),1);
+for i=1:size(Y,1), p(i)=~any(all(Y>=Y(i,:),2)&any(Y>Y(i,:),2)); end
+end
+
+function T=weightSensitivity(C,ids)
+T=table(); if isempty(ids), return; end
+counts=zeros(numel(ids),1); experiments=0;
+for a=0:20
+    for b=0:20-a
+        w=[a b 20-a-b]/20; s=C*w'; win=abs(s-max(s))<=1e-12;
+        counts=counts+double(win); experiments=experiments+1;
+    end
+end
+T.GroupID=ids; T.TiedOrSoleWinnerCount=counts;
+T.WeightGridPoints=repmat(experiments,numel(ids),1);
+T.WinnerFraction=counts/experiments; % Ties counted for every tied condition.
+end
+
+function G=predictionGrid(B,c)
+lev=cell(1,3); names={'Layer','Density','Angle'};
+for k=1:3, lev{k}=unique(B.(names{k})); end
+[a,b,d,p]=ndgrid(lev{1},lev{2},lev{3},[-1 1]);
+G=table(); G.CF=repmat(B.CF(1),numel(a),1); G.Layer=a(:);
+G.Density=b(:); G.Angle=d(:); G.Pattern=p(:);
+% Discrete tested factor levels. No rounding of a categorical continuous gene.
+end
+
+function P=predictGrid(G,T,allData,models,bounds,W,c)
+P=G; Xg=features(G,c); U=features(T,c); n=height(G);
+P.ExactTrainingCondition=ismember(Xg(:,2:5),U(:,2:5),'rows');
+Xobserved=features(allData,c);
+P.PreviouslyMeasured=ismember(Xg(:,2:5),Xobserved(:,2:5),'rows');
+P.PredeclaredEligible=true(n,1);
+for i=1:n
+    k=find(all(abs(Xobserved(:,2:5)-Xg(i,2:5))<1e-10,2),1);
+    if ~isempty(k)
+        P.PredeclaredEligible(i)=logical(allData.CandidateEligible(k)) && ...
+            ~ismember(allData.GroupID(k),c.CandidateExcludedIDs);
+    end
+end
+P.WithinPatternHull=false(n,1);
+for pat=[-1 1]
+    train=U(T.Pattern==pat,2:4); ix=G.Pattern==pat; query=Xg(ix,2:4);
+    inside=ismember(query,train,'rows');
+    if size(train,1)>=4 && rank(train-mean(train,1))==3
+        try
+            tri=delaunayn(train); inside=inside|~isnan(tsearchn(train,tri,query));
+        catch
+            % Degenerate numerical hull: retain only exact observed support.
+        end
+    end
+    P.WithinPatternHull(ix)=inside;
+end
+Yhat=zeros(n,3); pass=true; names={'FlexStrength','FlexModulus','FlexToughness'};
+for j=1:3
+    m=models{j}; A=Xg(:,m.keep); Yhat(:,j)=A*m.beta;
+    h=sum((A/m.R).^2,2); z=betaincinv(.05,m.df/2,.5); tc=sqrt(m.df*(1/z-1));
+    half=tc*sqrt(m.MSE*(1+h));
+    P.(['Predicted_' names{j}])=Yhat(:,j);
+    P.(['ConditionalPI95Lower_' names{j}])=Yhat(:,j)-half;
+    P.(['ConditionalPI95Upper_' names{j}])=Yhat(:,j)+half;
+    limit=c.MaxAcceptableCVRMSE(j);
+    pass=pass && isfinite(limit) && limit>0 && m.RMSENested<=limit && m.Q2VsLOOMean>0;
+end
+P.PositivePredictions=all(Yhat>0,2);
+P.OutsideMeasuredResponseRange=any(Yhat<bounds(1,:) | Yhat>bounds(2,:),2);
+[~,C,~]=greyCoefficients(Yhat,c.Zeta,bounds);
+P.GRG_ModelReference=C*W';
+P.InternalEngineeringGate=repmat(pass,n,1);
+P.TensileFeasibilityVerified=false(n,1);
+if ~any(isfinite(c.MinTensile)), P.TensileFeasibilityVerified=true(n,1); end
+% Actual tensile results may certify the constraints only at measured points.
+if any(isfinite(c.MinTensile))
+    required=isfinite(c.MinTensile);
+    V=allData{:,{'TensileStrength','TensileModulus','TensileToughness'}};
+    for i=1:n
+        k=find(all(abs(Xobserved(:,2:5)-Xg(i,2:5))<1e-10,2),1);
+        if ~isempty(k), P.TensileFeasibilityVerified(i)=all(isfinite(V(k,required))) && all(V(k,required)>=c.MinTensile(required)); end
+    end
+end
+P.EligibleForProvisionalRanking=P.WithinPatternHull & P.PositivePredictions & P.PredeclaredEligible & ...
+    ~P.OutsideMeasuredResponseRange & P.InternalEngineeringGate & P.TensileFeasibilityVerified;
+P.ParetoPredictedSupported=false(n,1); e=P.EligibleForProvisionalRanking;
+P.ParetoPredictedSupported(e)=paretoMax(Yhat(e,:));
+P.RequiresIndependentConfirmation=true(n,1);
+end
+
+function E=externalCheck(file,cf,train,models,c)
+E=table(); if isempty(file), return; end
+V=readInput(file,c); validateInput(V,c); V=V(V.CF==cf,:);
+X=features(V,c); A=features(train,c); names={'FlexStrength','FlexModulus','FlexToughness'};
+for i=1:height(V)
+    for j=1:3
+        m=models{j}; x=X(i,m.keep); h=sum((x/m.R).^2,2);
+        z=betaincinv(.05,m.df/2,.5); tc=sqrt(m.df*(1/z-1));
+        pred=x*m.beta; half=tc*sqrt(m.MSE*(1+h)); measured=V.(names{j})(i);
+        a=table(); a.ValidationIndex=i; a.GroupID=V.GroupID(i); a.Response=names(j);
+        a.SeenDesign=any(all(abs(A(:,2:5)-X(i,2:5))<1e-10,2));
+        a.Measured=measured; a.Predicted=pred;
+        a.RelativeErrorPercent=100*(pred-measured)/measured;
+        a.ConditionalPI95Lower=pred-half; a.ConditionalPI95Upper=pred+half;
+        a.InConditionalPI95=(measured>=pred-half && measured<=pred+half);
+        E=appendTable(E,a);
+    end
+end
+% All columns assigned by name; no variable named Row/Variables/Properties.
+end
+
+function T=augmentDesign(B,c)
+G=predictionGrid(B,c); X=features(B,c); Q=features(G,c);
+available=~ismember(Q(:,2:5),X(:,2:5),'rows'); T=G([],:);
+for step=1:c.AugmentationCount
+    inds=find(available); if isempty(inds), break; end
+    ranks=zeros(numel(inds),1); score=ranks;
+    for k=1:numel(inds)
+        s=svd([X;Q(inds(k),:)]); r=rank([X;Q(inds(k),:)]);
+        ranks(k)=r; score(k)=2*sum(log(s(1:r)));
+    end
+    bestRank=max(ranks); score(ranks<bestRank)=-Inf; [~,k]=max(score); ix=inds(k);
+    a=G(ix,:); a.SequentialOrder=step; a.RankAfterAddition=bestRank;
+    a.ModelResidualDFIfMeasured=size(X,1)+1-bestRank;
+    T=appendTable(T,a); X=[X;Q(ix,:)]; available(ix)=false; %#ok<AGROW>
+end
+end
+
+function drawDiagnostics(T,models,names,tag,c)
+visible='off'; if c.ShowFigures && usejava('desktop'), visible='on'; end
+f=figure('Visible',visible,'Color','w','Name',tag,'Position',[50 50 1250 1100]);
+for j=1:3
+    m=models{j}; y=T.(names{j});
+    subplot(4,3,j); scatter(y,m.NestedPrediction,30,'filled'); hold on;
+    b=[min([y;m.NestedPrediction]),max([y;m.NestedPrediction])]; plot(b,b,'k--');
+    xlabel('Measured condition mean'); ylabel('Nested LOO prediction'); title(names{j},'Interpreter','none'); grid on;
+    subplot(4,3,j+3); scatter(m.fit,m.residual,30,'filled'); yline(0,'k--');
+    xlabel('Fitted mean'); ylabel('Residual'); grid on;
+    subplot(4,3,j+6); stem(T.GroupID,m.cooks,'filled');
+    xlabel('Group ID (not randomized run order)'); ylabel('Cook distance'); grid on;
+    subplot(4,3,j+9); r=sort(m.studentized); n=numel(r);
+    theoretical=-sqrt(2)*erfcinv(2*((1:n)'-.5)/n);
+    plot(theoretical,r,'o'); xlabel('Standard normal quantile');
+    ylabel('Studentized residual quantile'); grid on;
+end
+print(f,fullfile(c.OutDir,[tag '_diagnostics.png']),'-dpng','-r180');
+if ~c.ShowFigures || ~usejava('desktop'), close(f); end
+end
+
+function drawObserved(B,Z,C,W,cf,c)
+visible='off'; if c.ShowFigures && usejava('desktop'), visible='on'; end
+f=figure('Visible',visible,'Color','w','Name',sprintf('CF%g measured',cf), ...
+    'Position',[50 50 1150 420]);
+subplot(1,2,1); imagesc(Z); colorbar; caxis([0 1]);
+xticks(1:3); xticklabels({'Strength','Modulus','Energy density'});
+yticks(1:height(B)); yticklabels(string(B.GroupID)); ylabel('Group ID'); title('Normalized measured means');
+subplot(1,2,2); y=B{:,{'FlexStrength','FlexModulus','FlexToughness'}};
+scatter3(y(:,1),y(:,2),y(:,3),55,C*W','filled'); hold on;
+p=paretoMax(y); scatter3(y(p,1),y(p,2),y(p,3),140,'ro');
+xlabel('Strength (MPa)'); ylabel('Modulus (MPa)'); zlabel('Energy density (MJ/m^3)');
+title('Measured points; circles = Pareto points'); colorbar; grid on;
+print(f,fullfile(c.OutDir,sprintf('CF%g_measured.png',cf)),'-dpng','-r180');
+if ~c.ShowFigures || ~usejava('desktop'), close(f); end
+end
+
+function s=summarizeScenario(cf,name,ranking,X)
+s=table(); s.CF=cf; s.Scenario={name}; s.Conditions=height(ranking);
+s.EligibleConditions=sum(ranking.CandidateEligible); s.FullQuadraticRank=rank(X);
+s.ObservedParetoPoints=sum(ranking.ParetoEligible);
+s.BestGroupID=NaN; s.StrengthMPa=NaN; s.ModulusMPa=NaN;
+s.EnergyIntegral=NaN; s.GRG_CommonReference=NaN;
+k=find(ranking.CandidateEligible,1);
+if ~isempty(k)
+    s.BestGroupID=ranking.GroupID(k); s.StrengthMPa=ranking.FlexStrength(k);
+    s.ModulusMPa=ranking.FlexModulus(k); s.EnergyIntegral=ranking.FlexToughness(k);
+    s.GRG_CommonReference=ranking.GRG_CommonReference(k);
+end
+end
+
+function T=appendTable(T,a)
+if isempty(T), T=a; else, T=[T;a]; end
+end
+
+function writeNotes(outDir,c)
+f=fopen(fullfile(outDir,'READ_RESULTS.txt'),'w'); assert(f>=0,'Cannot write result notes.');
+cleanup=onCleanup(@()fclose(f)); %#ok<NASGU>
+fprintf(f,'Primary outputs: *_all_measured_ranking.csv and all_model_diagnostics.csv.\n');
+fprintf(f,'study_summary.csv lists the best measured eligible condition for each material/scenario.\n');
+fprintf(f,'Screened outputs describe a restricted domain, not proof of invalid excluded observations.\n');
+fprintf(f,'CommonReference holds within-material normalization and weights fixed across screening scenarios.\n');
+fprintf(f,'LocalReference reproduces scenario-specific normalization; scores are not comparable across scenarios/materials.\n');
+fprintf(f,'Nested LOO repeats all response-based model selection. Fixed-model Q2 is conditional and may be optimistic after selection.\n');
+fprintf(f,'MainEffects Q2 is for a predeclared linear model. Q2VsLOOMean compares with honest training-mean predictions.\n');
+fprintf(f,'The ANOVA uses a predeclared additive quadratic model on condition means. Residual SS includes model lack of fit.\n');
+fprintf(f,'Partial SS are adjusted tests; they need not sum to total SS. BH q values cover the 12 tests per material/scenario.\n');
+fprintf(f,'Coefficient p values and prediction intervals condition on the selected model; neither includes model-selection uncertainty.\n');
+fprintf(f,'Prediction intervals concern comparable condition means under model assumptions, not individual specimens.\n');
+fprintf(f,'No pure-error lack-of-fit test, specimen SD, robustness S/N or bootstrap significance is fabricated.\n');
+fprintf(f,'No mass/density normalization, fracture toughness or structural EI is inferred from flexural modulus.\n');
+fprintf(f,'Prediction grid is discrete and exploratory. Hull membership is geometric support, not a prediction guarantee.\n');
+fprintf(f,'New designs with active tensile constraints need tensile measurements; flexural models cannot certify them.\n');
+fprintf(f,'Engineering RMSE limits are [%g %g %g]; NaN leaves candidate recommendations disabled.\n',c.MaxAcceptableCVRMSE);
+fprintf(f,'Augmentation is sequential rank/D-optimal design advice, NOT an optimum-performance prediction.\n');
+fprintf(f,'DOCX import reads numeric table text only; it executes no embedded scripts or instructions. Verify imported CF mapping.\n');
+fprintf(f,'Integral stress(MPa) d strain(fraction) has units MJ/m^3; if strain is percent, divide by 100 before integration.\n');
+fprintf(f,'If stopping at 5%% strain or first cracking, name the energy endpoint explicitly; it is not fracture toughness.\n');
 end
