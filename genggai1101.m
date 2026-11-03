@@ -11,7 +11,7 @@ function results = fdm_paper_analysis(cfg)
 % 3.3 回归模型与预测验证
 % 3.4 残差及影响诊断
 % 3.5 多目标综合评价
-% 3.6 稳定性与筛选敏感性
+% 3.6 全数据稳定性分析
 % 3.7 相关关系与机理讨论依据
 % 3.8 局限、补点与独立确认
 %
@@ -21,6 +21,7 @@ function results = fdm_paper_analysis(cfg)
 % 韧性：按应力-应变积分解释，单位MJ/m^3；
 % 原始应变必须为无量纲小数，已有积分数值需要自行核对。
 %
+% 全部28组均参与分析，不按组号、资格标志或拉伸阈值排除实测数据。
 % 不自动删除异常点，不虚构逐件SD或纯误差。
 % 所有table逐列赋值，不使用Row作为变量名称。
 
@@ -31,6 +32,8 @@ end
 cfg = settings(cfg);
 D = experimentData(cfg.InputCSV);
 validateData(D,cfg);
+
+fprintf('全部28组实验数据均保留：10CF为14组，15CF为14组；排除组数=0。\n');
 
 if ~exist(cfg.OutDir,'dir')
     mkdir(cfg.OutDir);
@@ -182,8 +185,7 @@ for mi = 1:numel(levels)
     % 先计算实测Pareto集合，再计算GRG。
     % GRG是单一综合评价指标。
     %
-    % 全部样本归一化范围作为共同基准，
-    % 历史筛选对照使用相同范围与相同权重。
+    % 全部样本归一化范围作为共同基准，全部实测组参与评价。
     %
     % 默认权重仅延续原程序，不视为已验证的BWM结果。
 
@@ -231,21 +233,18 @@ for mi = 1:numel(levels)
     writetable(candidates,...
         fileName(cfg,tag,'S35_UNCONFIRMED_predictions'));
 
-    %% 3.6 稳定性与筛选敏感性
+    %% 3.6 全数据稳定性分析
     % 这里使用离散穷举，不强行生成遗传算法收敛曲线。
     %
     % 分别检查：
     % 权重变化；
     % 外层验证中的模型项选择频率；
-    % 历史23组子域；
     % 解除混杂的试验补点。
 
-    fprintf('3.6 稳定性与筛选敏感性。\n');
-
-    eligible = eligibleMask(B,cfg);
+    fprintf('3.6 全数据稳定性分析：保留全部%d组。\n',height(B));
 
     sensitivity = weightSensitivity(...
-        C(eligible,:),B.GroupID(eligible));
+        C,B.GroupID);
 
     writetable(sensitivity,...
         fileName(cfg,tag,'S36_weight_sensitivity'));
@@ -257,39 +256,6 @@ for mi = 1:numel(levels)
 
     writetable(frequencyTable,...
         fileName(cfg,tag,'S36_term_frequency'));
-
-    screened = struct();
-    keep = ~ismember(B.GroupID,cfg.LegacyExcludedIDs);
-
-    if any(~keep)
-
-        T = B(keep,:);
-
-        oldRanking = rankMeasured(T,bounds,W,cfg);
-
-        [oldModels,oldDiag] = fitResponses(T,cfg,terms);
-
-        oldDiag.CF = repmat(cf,3,1);
-        oldDiag.Scenario = ...
-            repmat({'HistoricalSubset'},3,1);
-
-        totalDiag = appendTable(totalDiag,oldDiag);
-
-        writetable(oldRanking,...
-            fileName(cfg,tag,'S36_screened_ranking'));
-
-        writetable(oldDiag,...
-            fileName(cfg,tag,'S36_screened_diagnostics'));
-
-        summary = appendTable(summary,...
-            scenarioSummary(cf,'HistoricalSubset',...
-            oldRanking,features(T,cfg)));
-
-        screened = struct('Data',T,...
-            'Ranking',oldRanking,...
-            'Diagnostics',oldDiag,...
-            'Models',{oldModels});
-    end
 
     augmentation = augmentDesign(B,cfg);
 
@@ -352,7 +318,6 @@ for mi = 1:numel(levels)
         'Weights',W,...
         'Ranking',ranking,...
         'WeightSensitivity',sensitivity,...
-        'HistoricalSubset',screened,...
         'Augmentation',augmentation,...
         'Confirmation',confirmation);
 end
@@ -386,7 +351,7 @@ d = struct(...
     'ConfirmationCSV','',...
     'MakeFigures',true,...
     'ShowFigures',true,...
-    'LegacyExcludedIDs',[2 3 6 20 27],...
+    'LegacyExcludedIDs',[],...
     'CandidateExcludedIDs',[],...
     'MinTensile',[-Inf -Inf -Inf],...
     'WeightMode','fixed',...
@@ -431,6 +396,11 @@ for i = 1:numel(f)
     end
 end
 
+% 保留旧字段名以兼容空设置，但本版本禁止指定任何排除组号。
+assert(isempty(c.LegacyExcludedIDs) && isempty(c.CandidateExcludedIDs),...
+    '必须保留全部28组：LegacyExcludedIDs和CandidateExcludedIDs须为空。');
+
+% MinTensile只核查未确认预测工艺的工程可行性，不筛除实测实验组。
 assert(c.Zeta > 0 && c.Zeta <= 1,...
     'Zeta须在(0,1]内。');
 
@@ -521,9 +491,8 @@ else
         'CSV缺少必要列。');
 end
 
-if ~ismember('CandidateEligible',D.Properties.VariableNames)
-    D.CandidateEligible = true(height(D),1);
-end
+% 即使CSV含旧资格标志，也让全部实测组参与排名和敏感性分析。
+D.CandidateEligible = true(height(D),1);
 
 end
 
@@ -546,6 +515,13 @@ assert(all(isfinite(A(:))),...
 
 assert(numel(unique(D.GroupID)) == height(D),...
     '全局组号不能重复。');
+
+assert(height(D) == 28 && isequal(sort(D.GroupID(:)),(1:28)'),...
+    '必须包含全部28组实验数据，组号须为1至28，不得缺组。');
+
+assert(all(D.CF(D.GroupID <= 14) == 10) && ...
+    all(D.CF(D.GroupID >= 15) == 15),...
+    '第1至14组须为10CF，第15至28组须为15CF。');
 
 assert(all(ismember(D.Pattern,[-1 1])),...
     '图案须为-1或+1。');
@@ -691,15 +667,10 @@ end
 end
 
 
-function e = eligibleMask(T,c)
+function e = eligibleMask(T,c) %#ok<INUSD>
 
-e = logical(T.CandidateEligible) & ...
-    ~ismember(T.GroupID,c.CandidateExcludedIDs);
-
-v = T{:,{'TensileStrength',...
-    'TensileModulus','TensileToughness'}};
-
-e = e & all(v >= c.MinTensile,2);
+% 所有实测组均参与GRG、Pareto及图形评价，不进行资格筛选。
+e = true(height(T),1);
 
 end
 
@@ -1318,20 +1289,6 @@ P.PreviouslyMeasured = ...
 
 P.PredeclaredEligible = true(n,1);
 
-for i = 1:n
-
-    k = find(all(...
-        abs(Xobserved(:,2:5)-Xg(i,2:5)) < 1e-10,2),1);
-
-    if ~isempty(k)
-
-        P.PredeclaredEligible(i) = ...
-            logical(allData.CandidateEligible(k)) && ...
-            ~ismember(allData.GroupID(k),...
-            c.CandidateExcludedIDs);
-    end
-end
-
 P.WithinPatternHull = false(n,1);
 
 for pat = [-1 1]
@@ -1730,7 +1687,7 @@ fprintf(fid,...
     'Nested CV evaluates model selection; high fitted R2 alone is insufficient.\n');
 
 fprintf(fid,...
-    'Historical exclusions define a sensitivity subset, not invalid measurements.\n');
+    'All 28 experimental conditions are retained; no historical exclusion subset is generated.\n');
 
 fprintf(fid,...
     'Common-reference normalization and weights are fixed within each material.\n');
