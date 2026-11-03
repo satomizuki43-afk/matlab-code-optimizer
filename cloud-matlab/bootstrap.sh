@@ -2,20 +2,28 @@
 set -euo pipefail
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-matlab_release="${MATLAB_RELEASE:-R2026b}"
+matlab_release="${MATLAB_RELEASE:-R2026a}"
+matlab_license_mode="${MATLAB_LICENSE_MODE:-online}"
+case "$matlab_license_mode" in
+    network|online|onlinelicensing) ;;
+    *) printf 'MATLAB_LICENSE_MODE must be network, online or onlinelicensing.\n' >&2; exit 64 ;;
+esac
 export MATLAB_ROOT="${MATLAB_ROOT:-/workspace/MATLAB/$matlab_release}"
 matlab_bootstrap_work="${MATLAB_BOOTSTRAP_WORK:-/workspace/work/matlab-bootstrap}"
 matlab_tmp_base="${MATLAB_INSTALL_TMP_BASE:-/tmp}"
 matlab_license_endpoint_file="${MATLAB_LICENSE_ENDPOINT_FILE:-$matlab_bootstrap_work/license-server.txt}"
-if [[ -z "${MLM_LICENSE_FILE:-}" && -r "$matlab_license_endpoint_file" ]]; then
+if [[ "$matlab_license_mode" == network && -z "${MLM_LICENSE_FILE:-}" && -r "$matlab_license_endpoint_file" ]]; then
     IFS= read -r MLM_LICENSE_FILE < "$matlab_license_endpoint_file" || [[ -n "${MLM_LICENSE_FILE:-}" ]]
     export MLM_LICENSE_FILE
 fi
 check_only=false
+install_only=false
 if [[ "${1:-}" == --check && $# == 1 ]]; then
     check_only=true
+elif [[ "${1:-}" == --install-only && $# == 1 ]]; then
+    install_only=true
 elif [[ $# != 0 ]]; then
-    printf 'Usage: bash cloud-matlab/bootstrap.sh [--check]\n' >&2
+    printf 'Usage: bash cloud-matlab/bootstrap.sh [--check|--install-only]\n' >&2
     exit 64
 fi
 
@@ -25,15 +33,18 @@ if [[ "$(uname -s)" != Linux || "$(uname -m)" != x86_64 ]]; then
 fi
 # This dependency snapshot targets Debian 13, as used by this cloud environment.
 . /etc/os-release
-if [[ "$ID" != debian || "${VERSION_ID%%.*}" != 13 || "$matlab_release" != R2026b ]]; then
-    printf 'This bootstrap targets Debian 13 and MATLAB R2026b. Update the OS/dependency plan before choosing another release.\n' >&2
+if [[ "$ID" != debian || "${VERSION_ID%%.*}" != 13 || "$matlab_release" != R2026a ]]; then
+    printf 'This bootstrap targets Debian 13 and MATLAB R2026a. Update the OS/dependency plan before choosing another release.\n' >&2
     exit 69
 fi
 
 printf 'Target: MATLAB %s, Linux x86_64, Debian %s\n' "$matlab_release" "$VERSION_ID"
 printf 'Install directory: %s\n' "$MATLAB_ROOT"
+printf 'License mode: %s (authorization not yet verified).\n' "$matlab_license_mode"
 df -h /workspace "$matlab_tmp_base"
-if [[ -n "${MLM_LICENSE_FILE:-}" ]]; then
+if [[ "$matlab_license_mode" != network ]]; then
+    printf 'Account sign-in is required on this cloud machine; saved network endpoints are ignored.\n'
+elif [[ -n "${MLM_LICENSE_FILE:-}" ]]; then
     printf 'Network license endpoint configured: yes (value hidden).\n'
 else
     printf 'Network license endpoint configured: no.\n'
@@ -70,6 +81,13 @@ if [[ ! -x "$MATLAB_ROOT/bin/matlab" ]]; then
         --products MATLAB 2>&1 | tee "$matlab_bootstrap_work/install.log"
 fi
 
+if "$install_only" || [[ "$matlab_license_mode" != network ]]; then
+    printf 'MATLAB files installed. Runtime and license checkout have not been verified.\n'
+    if [[ "$matlab_license_mode" != network ]]; then
+        printf 'Next: authenticate interactively with MATLAB_LICENSE_MODE=%s bash cloud-matlab/matlab.sh -nodisplay\n' "$matlab_license_mode"
+    fi
+    exit 0
+fi
 if [[ -z "${MLM_LICENSE_FILE:-}" ]]; then
     printf 'MATLAB files installed. Configure MLM_LICENSE_FILE before the runtime/license check.\n' >&2
     exit 78

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Install missing runtime libraries into a writable prefix, without sudo.
-# The package list is the official MathWorks Debian 13 / R2026b list.
+# The package list is the official MathWorks Debian 13 / R2026a list.
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 matlab_system_libs="${MATLAB_SYSTEM_LIBS:-/workspace/MATLAB/system-libs}"
 matlab_bootstrap_work="${MATLAB_BOOTSTRAP_WORK:-/workspace/work/matlab-bootstrap}"
@@ -42,7 +42,7 @@ fi
 
 for package in "${missing[@]}"; do
     case "$package" in
-        lib*|ibverbs-providers) ;;
+        lib*|ibverbs-providers|net-tools) ;;
         *) printf 'Install the missing system package in the base environment: %s\n' "$package" >&2; exit 69 ;;
     esac
 done

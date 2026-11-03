@@ -1,49 +1,73 @@
-# Codex 云端 Linux MATLAB
+# Codex 云端 Linux MATLAB R2026a
 
-当前交付状态：安装与运行脚本已准备；本次会话缺失的四个运行库已下载并解包到用户目录。MATLAB 尚未安装，学校许可接入及完整分析尚未实际验证。
+当前目标：Debian 13、x86_64、2 核、8 GiB 内存，安装与用户本机一致的 MATLAB R2026a，使用已确认的学校账号许可。MATLAB 本体尚未安装；MathWorks 下载域名仍被云环境出站代理以 403 拒绝，账号登录与完整分析尚未实际验证。
 
-本环境为 Debian 13、x86_64、2 核、8 GiB 内存，采用原生 MATLAB R2026b。安装路径默认是 `/workspace/MATLAB/R2026b`，可用 `MATLAB_ROOT` 指定其他路径。缺失系统库由 `runtime-deps.sh` 在无 root 权限下准备到 `/workspace/MATLAB/system-libs`，可用 `MATLAB_SYSTEM_LIBS` 修改位置。
+安装路径默认是 `/workspace/MATLAB/R2026a`，可用 `MATLAB_ROOT` 指定其他路径。依赖清单采用 MathWorks 官方 R2026a/Debian 13 清单。缺失库及 `net-tools` 由 `runtime-deps.sh` 在无 root 权限下准备到 `/workspace/MATLAB/system-libs`，可用 `MATLAB_SYSTEM_LIBS` 修改位置。
 
-## 安装前需要完成
+## 安装前的环境条件
 
-- 在云环境的网络设置中允许 MathWorks 下载域名。当前策略未放行，访问会返回 403；至少需要覆盖 `www.mathworks.com`、`ssd.mathworks.com` 及下载过程中使用的其他 MathWorks 子域名。修改本地网络策略文件不能放行网络，也不要绕过会话代理。
-- 取得学校网络许可服务器信息：`lmgrd` 地址和端口，以及 MATLAB vendor daemon 的端口。两者都需要云环境 TCP 访问许可；若服务器只允许校内访问，还需要已配置的学校 VPN 或其他获准网络连接。当前会话未配置 VPN，TCP 网关也无法连接。学校地址仅存入会话工作目录，不提交到 GitHub。
-- MATLAB 网络许可证不支持普通 HTTP/HTTPS 代理；设置下载代理不能使许可证连接自动可用。本平台的私网 TCP 接入还需平台 VPN、服务器域名 TCP 授权及与许可证协议兼容的转发，由运维或学校管理员确认；本平台没有可直接从执行器访问任意公网 TCP 端口的通道。
-- 确认学校许可证允许当前 MATLAB 版本和云端使用。将服务器端点配置到环境变量 `MLM_LICENSE_FILE`；不要把账号密码或许可文件内容提交到仓库。
-- 当前 `/workspace` 约有 7.5 GiB、独立 `/tmp` 约有 4.9 GiB 可用。仅安装 MATLAB 本体、保留默认 JRE，临时文件放 `/tmp`。安装峰值空间是否足够仍须实际验证；需要其他工具箱时应扩容。
+- 在云环境网络设置中放行 MathWorks 下载、Service Host 和账号认证需要的服务。至少包括 `www.mathworks.com`、`ssd.mathworks.com` 及其实际使用的下载/登录子域名；具体范围参考官方网络要求。脚本保留会话代理和 CA 校验，不能修改出站策略。
+- 已确认账号关联 Campus-Wide 或 Individual 许可；实际可选的在线许可模式与运行权限仍需通过云端首次登录验证。本机登录状态不会自动迁移到云端。
+- 账号模式需要适配 R2026a 的 MathWorks Service Host 及可写的用户运行数据/认证存储。当前用户目录只读；`MATLAB_PREFDIR` 只解决 MATLAB 偏好目录，不能视为已经解决 Service Host 的账号存储。需要平台提供受支持的可写用户数据环境，或由 MathWorks 确认其他受支持的配置。配置脚本自身仅管理工作目录，不改写 `HOME`，不搬运本机认证文件；MATLAB/Service Host 运行数据目录仍需平台解决。
+- 当前安装盘约有 7.3 GiB、独立临时盘约有 4.9 GiB 可用。基础 MATLAB 约需 4.5 GB，安装峰值空间仍须实测；仅安装 MATLAB 本体并保留默认 JRE，临时文件放 `/tmp`。
 
-## 安装和运行
+## 安装与账号登录
 
-以下命令在仓库根目录执行。先用学校提供的实际端点替换示例：
+以下命令在仓库根目录执行。默认版本为 R2026a，默认 `MATLAB_LICENSE_MODE=online`。
 
 ```bash
-export MLM_LICENSE_FILE='27000@license.example.edu'
 bash cloud-matlab/bootstrap.sh --check
-bash cloud-matlab/bootstrap.sh
+bash cloud-matlab/bootstrap.sh --install-only
+bash cloud-matlab/matlab.sh -nodisplay
+```
+
+第三条命令按官方 Login Named User 方式附加 `-licmode online`，供用户在交互终端完成首次登录。账号、密码和认证信息由用户在官方流程中处理，不写入代码或聊天。若许可证使用 New Licensing Technology，按 MathWorks 官方要求选择：
+
+```bash
+MATLAB_LICENSE_MODE=onlinelicensing bash cloud-matlab/matlab.sh -nodisplay
+```
+
+两个账号模式均忽略先前保存的网络许可端点，并为 MATLAB 子进程移除 `MLM_LICENSE_FILE`，避免选择错误的许可来源。该设置不会修改父进程环境或删除保存的端点。
+
+账号登录与许可验证成功后，用同一模式运行：
+
+```bash
 bash cloud-matlab/matlab.sh -batch "disp(version)"
 bash cloud-matlab/matlab.sh -batch "run('cloud-matlab/run_analysis.m')"
 ```
 
-`--check` 用于检查安装条件，不等于已经安装或授权成功。`runtime-deps.sh` 负责缺失运行库；`matlab.sh` 使用上述 MATLAB 和系统库路径启动程序。整个流程不要求 `sudo`，保留环境提供的代理和证书设置。
+如果登录时选择了 `onlinelicensing`，在后续命令前同样加 `MATLAB_LICENSE_MODE=onlinelicensing`。首次登录与批处理复用是否成功均以真实 MATLAB 运行结果为准；目前尚未执行。
 
-本会话的默认用户目录不可写，启动脚本将 MATLAB 偏好目录设置为 `/workspace/work/matlab-preferences/R2026b`；可通过 `MATLAB_PREFDIR` 覆盖，不修改 `HOME`。
+`--check` 只检查本地依赖和安装条件，不验证下载网络或许可签出。`--install-only` 安装文件后结束，不尝试登录。默认安装命令在账号模式下也不会自动进行首次账号认证。
 
-在本次会话，提供的许可端点保存在 `/workspace/work/matlab-bootstrap/license-server.txt`（权限 600）；没有显式设置 `MLM_LICENSE_FILE` 时，两个启动脚本会读取该文件。新环境需要重新设置端点或通过云环境的运行变量传入。端点存在不代表服务器已可达或许可已经验证。
+## 网络许可证作为可选模式
 
-缺失依赖从 Debian 官方签名仓库下载，APT 索引写入工作目录，不修改系统 APT 状态。脚本保留系统的 CA 校验和下载代理。使用前可执行 `bash -n cloud-matlab/*.sh` 检查 shell 语法。
+只有明确选择网络许可时才使用以下方式；当前账号方案不要求取得学校 MLM 端口：
 
-`run_analysis.m` 将仓库中的 `genggai1101.m` 原样复制为 `/workspace/work/matlab-validation/fdm_paper_analysis.m`，使文件名与主函数一致，仓库源码不变。运行使用当前会话搜索路径，不调用 `savepath`。它会生成图片但不显示窗口，输出位于 `/workspace/work/matlab-validation/results`。
+```bash
+MLM_LICENSE_FILE='27000@license.example.edu' MATLAB_LICENSE_MODE=network bash cloud-matlab/matlab.sh -batch "disp(version)"
+```
 
-运行成功后，脚本检查：组号 1–28 全部保留；10CF 和 15CF 各 14 组；每种材料的数据、实测排名和权重敏感性都包含相同的 14 个组号；排除组号为空；每项响应的诊断样本数为 14；汇总只有两行 `All` 情景。回归、ANOVA、嵌套 LOO、权重和 Pareto 方法不作修改。
+在本次会话，曾提供的网络许可端点保存于 `/workspace/work/matlab-bootstrap/license-server.txt`（权限 600）。仅当 `MATLAB_LICENSE_MODE=network` 且未显式设置 `MLM_LICENSE_FILE` 时读取；学校真实地址不提交到 GitHub。
+
+网络模式需要服务器的 lmgrd 与 MLM 两个 TCP 端口都可达，可能需要学校 VPN。本平台尚未配置该 VPN/TCP 通道。普通 HTTP/HTTPS 代理不能代理 MATLAB 网络许可通信；仅写入端点不代表服务器可达。
+
+## 运行及数据完整性
+
+缺失依赖从 Debian 官方签名仓库下载，APT 索引写入工作目录，不修改系统 APT 状态。启动脚本为 MATLAB 添加用户目录中的库和工具路径，并将偏好目录设为 `/workspace/work/matlab-preferences/R2026a`；可用 `MATLAB_PREFDIR` 覆盖。
+
+`run_analysis.m` 将 `genggai1101.m` 原样复制为 `/workspace/work/matlab-validation/fdm_paper_analysis.m`，使文件名与主函数一致。它生成图片但不显示窗口，输出至 `/workspace/work/matlab-validation/results`，不修改原统计方法。
+
+运行成功后核查：全部组号 1–28；10CF 和 15CF 各 14 组；各材料的数据、实测排名和权重敏感性均包含相同的 14 个组号；排除组号为空；每项响应诊断 N=14；汇总仅两行 All 情景。
 
 ## 官方依据
 
-- [R2026b Linux 系统要求](https://www.mathworks.com/support/requirements/matlab-linux.html)
-- [获取 MATLAB Package Manager](https://www.mathworks.com/help/install/ug/get-mpm-os-command-line.html)
+- [R2026a Linux 系统需求](https://www.mathworks.com/content/dam/mathworks/mathworks-dot-com/support/sysreq/files/system-requirements-release-2026a-linux.pdf)
+- [R2026a / Debian 13 运行库清单](https://github.com/mathworks-ref-arch/container-images/blob/main/matlab-deps/r2026a/debian13/base-dependencies-amd64.txt)
 - [MPM 安装参数、TMPDIR 和代理支持](https://www.mathworks.com/help/install/ug/mpminstall.html)
-- [Debian 13 官方运行库清单](https://github.com/mathworks-ref-arch/container-images/blob/main/matlab-deps/r2026b/debian13/base-dependencies-amd64.txt)
-- [网络许可证配置](https://www.mathworks.com/help/install/ug/network-license-files.html)
-- [网络许可证不支持普通代理](https://www.mathworks.com/matlabcentral/answers/2181637-does-the-network-license-manager-support-proxy-connections)
-- [网络许可证的两个 TCP 端口](https://www.mathworks.com/matlabcentral/answers/96756-what-ports-does-the-network-license-manager-use-and-how-can-i-set-those-ports)
+- [云端许可要求](https://www.mathworks.com/help/install/license/licensing-for-mathworks-products-running-on-the-cloud.html)
+- [无显示器环境的账号登录方式](https://www.mathworks.com/matlabcentral/answers/547302-is-login-named-user-available-on-machines-without-a-display)
+- [Login Named User 要求](https://www.mathworks.com/matlabcentral/answers/168441-what-is-login-named-user-and-how-can-i-use-it)
+- [Service Host 管理和版本要求](https://github.com/mathworks-ref-arch/administer-mathworks-service-host)
 - [MATLAB 偏好目录设置](https://www.mathworks.com/matlabcentral/answers/93696-how-do-i-change-the-matlab-preferences-directory-location)
-- [MathWorks 网络域名和端口](https://www.mathworks.com/matlabcentral/answers/97265-which-ports-and-addresses-do-mathworks-products-and-mathworks-online-services-use)
+- [MathWorks 网络要求](https://www.mathworks.com/matlabcentral/answers/97265-which-ports-and-addresses-do-mathworks-products-and-mathworks-online-services-use)
